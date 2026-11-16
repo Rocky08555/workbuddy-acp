@@ -22,17 +22,24 @@ description: 当 Codex 通过 ACP 将编码或文件任务委托给 WorkBuddy/Co
 ## 状态判读与恢复
 
 1. `workbuddy_session_send` 是 ACP 会话流程；`waitMs` 超时可能只返回 `running`，应对同一会话继续 `poll`，不代表失败或取消。`run_workbuddy_task` 是非交互调用，不使用 ACP 的 poll 或权限恢复流程。
-2. 判断中断时一起核对会话 `state`、`stopReason`、`error`、`cancelRequestedAt`、`pendingPermissions`、最后工具调用及其结果，以及 transcript 后续事件。`cancelRequestedAt` 只表明记录过取消请求；桌面“中断”标签不能单独证明任务已取消，共享索引可能滞后，也不能单独确认终态。
-3. `waiting_permission` 表示有待处理授权，按下节逐项核验并处理。若 Edit 等工具调用没有结果、assistant 为 incomplete，且无明确取消事件，记录为 ACP/工具状态不明；不要归因用户、宣称改动成功或未发生，也不要重复派发。
-4. 当前 MCP 无活动连接或不持有该 ACP 连接时，不要重发任务；回到发起任务的 MCP 会话继续 poll 或处理授权。只有会话处于终态才能尝试 `close`，且操作方可能需要持有该 ACP 连接。
+2. 判断中断时一起核对会话 `state`、`stopReason`、`error`、`cancelRequestedAt`、`pendingPermissions`、最后工具调用及其结果，以及 transcript 后续事件。`cancelRequestedAt`、桌面“中断”标签或共享索引都不能单独证明用户取消或任务终止；索引也可能滞后。
+3. `workbuddy_session_answer_permission(kind=reject)` 拒绝当前权限操作；`kind=cancel` 只中止该工具调用。`workbuddy_session_cancel` 会发送当前回合的 `session/cancel`。
+4. 权限被拒后当前回合可能显示 `state=cancelled`；不能只凭该状态归因用户主动取消。结合权限答复、取消事件和 transcript 判读，`cancelRequestedAt=null` 也不单独定因。
+5. 用户仍要求继续时，核对工作区后用同名 `sessionName` 续接原 `sessionId`；不得把先前拒绝当授权或重试该操作，除非获得新的明确授权。
+6. `archived`、`desktopIndex` 是归档/索引信息，与 ACP 回合 `state` 分开判读。最新状态仍为 `running` 或 `waiting_permission` 时按活动会话处理；归档标记不能单独证明任务终止。
+7. `waiting_permission` 表示有待处理授权，按下节逐项核验。若 Edit 等工具调用没有结果、assistant 为 incomplete，且无明确取消事件，记录为 ACP/工具状态不明；不要归因用户、宣称改动成功或未发生，也不要重复派发。
+8. 同一 `toolCallId` 的多条 `in_progress` 是同一调用的进度，按 ID 合并并继续 poll，直到看到该调用的终态；没有终态时不要重发或宣称完成。
+9. 工具事件可能只有命令、标题和状态，没有 `stdout`、`stderr` 或 `exit_code`。运行测试时保留并回报实际命令、退出码和输出；最终回复缺少这些实测结果时标为未核验，不只凭工具完成事件宣称通过。
+10. 当前 MCP 无活动连接或不持有该 ACP 连接时，回到发起任务的 MCP 会话处理，不从新 MCP 重发。只有会话处于终态才能尝试 `close`，且操作方可能需要持有该 ACP 连接。
 
 ## 处理 ACP 授权
 
 1. 发现 `waiting_permission` 后先查看 `pendingPermissions`，核对工具、操作、路径或完整命令，以及该请求实际提供的选项。
 2. 对本任务必需且完全位于指定 `cwd` 内的文件读取或写入，只选择该请求提供的最窄单次允许选项（通常是 `allow_once`）。按 `optionId` 作答时必须使用原请求提供的 ID。
-3. 不默认选择 `allow_always`，不绕过 ACP，也不把一次任务授权扩大成持久授权。
+3. 禁止选择 `allow_always`；不绕过 ACP，也不把一次任务授权扩大成持久授权。
 4. 命令请求要先检查具体命令及其脚本副作用；`cwd` 本身不能证明命令只影响该目录。安装、联网、管理员操作、修改凭据/系统配置、目录外访问、删除无关数据、提交/推送/部署，都要先取得用户明确授权。
-5. 授权后继续对同一会话调用 `workbuddy_session_poll`；不要重发任务来绕过等待。若当前 MCP 进程没有活动连接或不持有该 ACP 连接，按上节回到发起任务的会话处理。
+5. `answer_permission` 使用较短 `waitMs`；到达上限返回 `running` 只表示等待结束，应继续 poll 同一会话，并逐项审查新出现的权限请求。不要重发任务来绕过等待。
+6. Edit 等权限预览被截断或无法核实完整差异时不要授权；先要求缩小补丁并重新提交可审查请求。完成后只检查获准路径的 diff 和 EOL 变化，不做全仓扫描。
 
 ## 禁止事项
 
